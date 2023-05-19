@@ -1,0 +1,1143 @@
+---
+title: "Meaning in colexification: beyond single edges and towards a network perspective"
+author: "Anna Di Natale, Armin Gander, David Garcia"
+output: 
+  pdf_document:
+    df_print: kable
+    keep_tex: true
+url_colour: blue
+always_allow_html: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+```
+Loading libraries
+```{r, libraries, results='hide'}
+library(dplyr) #for data transformations, version 1.1.2
+library(ggplot2) ##for plots, version 3.4.2
+library(lmtest) ##for likelihood ratio test, version 0.9.40
+library(RColorBrewer) ##set colors for heatmaps, version 1.1.3
+library(cocor) ##for statistics, version 1.1.4
+##for computing distances on the colexification network:
+library(igraph) ##for working with graphs and networks, version 1.4.2
+library(xtable) ##for tables, version 1.8.4
+library(reticulate) ##for inverting matrices with Python, version 1.28
+```
+
+Loading data
+```{r}
+clics3<-readRDS('datasets/clics3.Rda') ##Clics3 dataset
+inputs<-readRDS('datasets/all_mturk_ratings.Rda') ##full MTurk results
+simlex<-readRDS('datasets/SimLex-999.Rda') ##SimLex-999
+simlex<-simlex%>%rename(mean=SimLex999) ##renaming column
+simverb<-readRDS('datasets/SimVerb-3500.Rda') ##SimVerb-3500
+men<-readRDS('datasets/MEN.Rda') ##MEN
+men<-men%>%rename(mean=rating) ##renaming column
+SWW<-readRDS('datasets/SWW.Rda') ##Small World of Words data
+SWW<-SWW[SWW$num_participants>1,] ##cleaning out noise
+USF<-readRDS('datasets/USF.Rda') ##University of South Florida data
+cossim<-readRDS('datasets/cossim_fasttext.Rda') ##cosine similarity from FastText
+```
+
+Loading function for computing the distances in the network
+```{r}
+source('compute_simmatrix.R')
+```
+
+Computing the distances in the network (it might take some time)
+```{r}
+sim_lang<-compute_simmatrix(weight='LanguageWeight')
+# write.csv(sim_lang,'distances/simil_list_beta_0.8_clics3lang.csv') 
+sim_fam<-compute_simmatrix(weight='FamilyWeight')
+# write.csv(sim_fam,'distances/simil_list_beta_0.8_clics3fam.csv') 
+```
+
+Loading and preprocessing the distances on the network
+```{r}
+sim_lang = read.csv('distances/simil_list_beta_0.8_clics3lang.csv') ##loading Clics distance w/ language weights
+rownames(sim_lang) = sim_lang$X
+sim_lang = sim_lang[,-c(1)]
+colnames(sim_lang) = rownames(sim_lang)
+
+sim_fam = read.csv('distances/simil_list_beta_0.8_clics3fam.csv') ##loading Clics distance w/ family weights
+rownames(sim_fam) = sim_fam$X
+sim_fam = sim_fam[,-c(1)]
+colnames(sim_fam) = rownames(sim_fam)
+```
+
+Figure 2 SI: Coverage of MTurk questions on Clics3
+
+```{r}
+network<-clics3
+mturk_data<-inputs[inputs$in_clics==1,] ##selecting the annotated data that are edges in the network
+mturk_data$tested<-1 ##whether the pair has been annotated or not
+merged<-left_join(clics3,mturk_data[,c(1:2,6:7,12)],by=c('from_word','to_word')) ##merge annotations and clics data
+merged$tested[is.na(merged$tested)]<-0 ##pairs that have not been annotated
+
+percent<-data.frame(stringsAsFactors = F) ##vector of the percentages of coverage
+for (i in seq(sort(unique(merged$LanguageWeight)))) ##loop on the number of language weights
+{
+  percent<-rbind(percent,data.frame(th=i,percent=length(which(merged$tested==1&merged$LanguageWeight>=i))/length(which(merged$LanguageWeight>=i)),stringsAsFactors = F))
+}
+##Plot of the coverage of word pairs with a certain number of language weight
+ggplot(percent,aes(x=th,y=percent))+
+  geom_line()+geom_point()+ylim(0.45,0.85)+xlab("Number languages")+ylab("Percentage coverage")
+
+percent<-data.frame(stringsAsFactors = F)##vector of the percentages of coverage
+for (i in seq(sort(unique(merged$FamilyWeight)))) ##loop on the number of family weights
+{
+  percent<-rbind(percent,data.frame(th=i,percent=length(which(merged$tested==1&merged$FamilyWeight>=i))/length(which(merged$FamilyWeight>=i)),stringsAsFactors = F))
+}
+##Plot of the coverage of word pairs with a certain number of family weight
+ggplot(percent,aes(x=th,y=percent))+
+  geom_line()+geom_point()+ylim(0.45,0.85)+xlab("Number families")+ylab("Percentage coverage")
+
+```
+
+Table 1 - correlation of MTurk results with ground truth datasets (SimLex-999, SimVerb-3500, MEN)
+```{r}
+##preprocessing of datasets
+mturk_results<-inputs[inputs$type=='real_pair',]
+names_dataset<-c('SimLex-999','SimVerb-3500','MEN') ##vector with names of datasets
+table1<-data.frame(stringsAsFactors = F) ##initialising table
+for (j in c(1,2,3)) ##loop on the datasets
+{
+  if(j==1){dataset<-simlex} ##loading SimLex
+  else if(j==2){dataset<-simverb} ##loading SimVerb
+  else if(j==3){dataset<-men} ##loading MEN
+  merged<-data.frame(stringsAsFactors = F)
+  for (i in seq(1,nrow(dataset)))
+  {
+    ind<-which((mturk_results$from_word==dataset$word1[i]&mturk_results$to_word==dataset$word2[i]) | (mturk_results$from_word==dataset$word2[i]&mturk_results$to_word==dataset$word1[i])) ##index of the pair
+    if (length(ind)>0) ##if the pair is present in Clics
+    {
+      merged<-rbind(merged,data.frame(word1=dataset$word1[i],word2=dataset$word2[i],mturk_mean=mturk_results$mean[ind], mturk_mode=mturk_results$mode[ind], 
+                                      sim=dataset$mean[i],stringsAsFactors = F))  ##database with info for the word pair from both datasets
+    }
+  }
+  correl<-cor.test(merged$mturk_mean,merged$sim) ##correlation with the mean MTurk rating
+  pval<-'<0.001'
+  if(correl$p.value>=0.001){pval<-correl$p.value}
+  table1<-rbind(table1,data.frame(dataset=names_dataset[j],corr_mean=round(correl$estimate,digits=2),corr_ci1=round(correl$conf.int[1],digits=2),
+                                corr_ci2=round(correl$conf.int[2],digits=2),n=nrow(merged[!is.na(merged$mturk_mean)&!is.na(merged$sim),]),pval=pval,
+                                stringsAsFactors = F))
+}
+table1
+
+```
+
+Table 1 si - correlation of the word association data with MTurk annotations 
+```{r}
+table1si<-data.frame(stringsAsFactors = F) ##initialising dataframe
+mturk_results<-inputs[inputs$type=='real_pair',]
+colnames(mturk_results)[6]="mean_ratings"
+##SWOW
+merged<-left_join(mturk_results,SWW,by=c('from_word','to_word')) ##merging clics with SWOW
+#compute the correlation
+correl<-cor.test(merged$mean_ratings,merged$mean)
+pval<-'<0.001'
+if(correl$p.value>=0.001){pval<-correl$p.value}
+table1si<-rbind(table1si,data.frame(dataset='SWOW',corr_mean=round(correl$estimate,digits=2),corr_ci1=round(correl$conf.int[1],digits=2),
+                                corr_ci2=round(correl$conf.int[2],digits=2),n=nrow(merged[!is.na(merged$mean_ratings)&!is.na(merged$mean),]),pval=pval,
+                                stringsAsFactors = F))
+
+##USF
+merged<-left_join(mturk_results,USF,by=c('from_word','to_word')) ##merging clics with SWOW
+#compute the correlation
+correl<-cor.test(merged$mean_ratings,merged$mean)
+pval<-'<0.001'
+if(correl$p.value>=0.001){pval<-correl$p.value}
+table1si<-rbind(table1si,data.frame(dataset='USF',corr_mean=round(correl$estimate,digits=2),corr_ci1=round(correl$conf.int[1],digits=2),
+                                corr_ci2=round(correl$conf.int[2],digits=2),n=nrow(merged[!is.na(merged$mean_ratings)&!is.na(merged$mean),]),pval=pval,
+                                stringsAsFactors = F))
+
+table1si
+
+```
+
+LINK LEVEL 
+
+Table 2 - correlation of similarity data with colexification strength (link level)
+Table 2 SI rows 1, 2, 3, 4, 7 (SimLex, SimVerb, MEN, FastText and MTurk annotations) second column - number of overlapping edges
+Table 3 SI: correlation with the mode of the MTurk annotations
+```{r}
+table2<-data.frame(stringsAsFactors = F) ##table with the results
+table2si<-data.frame(stringsAsFactors = F) ##table with the results
+table3si<-data.frame(stringsAsFactors = F) ##table with the results
+mturk_results<-inputs[inputs$in_clics==1&inputs$type=='real_pair',] ##results of the MTurk task at the link level
+
+##SimLex-999
+merged_sl<-left_join(clics3,simlex,by=c('from_word'='word1','to_word'='word2')) ##merging clics with simlex
+#compute the correlations
+correl_lang<-cor.test(merged_sl$LanguageWeight,merged_sl$mean)
+correl_fam<-cor.test(merged_sl$FamilyWeight,merged_sl$mean)
+pval_lang<-'<0.001' ##pvalue
+if(correl_lang$p.value>=0.001){pval_lang<-round(correl_lang$p.value,digits=3)}
+pval_fam<-'<0.001' ##pvalue
+if(correl_fam$p.value>=0.001){pval_fam<-round(correl_fam$p.value,digits=3)}
+table2<-rbind(table2,data.frame(dataset='SimLex-999',corr_lang=round(correl_lang$estimate,digits=2),corr_lang_ci1=round(correl_lang$conf.int[1],digits=2),
+                                  corr_lang_ci2=round(correl_lang$conf.int[2],digits=2),pval_lang=pval_lang,corr_fam=round(correl_fam$estimate,digits=2),
+                                  corr_fam_ci1=round(correl_fam$conf.int[1],digits=2),corr_fam_ci2=round(correl_fam$conf.int[2],digits=2),pval_fam=pval_fam,
+                                n=length(which(!is.na(merged_sl$LanguageWeight)&!is.na(merged_sl$mean))),stringsAsFactors = F))
+table2si<-rbind(table2si,data.frame(dataset='SimLex-999',n_link=length(which(!is.na(merged_sl$mean))),
+                                perc_link=round(((length(which(!is.na(merged_sl$mean)))*100)/4228),digits=1),stringsAsFactors = F))
+
+##SimVerb-3500
+merged_sv<-left_join(clics3,simverb,by=c('from_word'='word1','to_word'='word2')) ##merging clics with simverb
+#compute the correlations
+correl_lang<-cor.test(merged_sv$LanguageWeight,merged_sv$mean)
+correl_fam<-cor.test(merged_sv$FamilyWeight,merged_sv$mean)
+pval_lang<-'<0.001' ##pvalue
+if(correl_lang$p.value>=0.001){pval_lang<-round(correl_lang$p.value,digits=3)}
+pval_fam<-'<0.001' ##pvalue
+if(correl_fam$p.value>=0.001){pval_fam<-round(correl_fam$p.value,digits=3)}
+table2<-rbind(table2,data.frame(dataset='SimVerb-3500',corr_lang=round(correl_lang$estimate,digits=2),corr_lang_ci1=round(correl_lang$conf.int[1],digits=2),
+                                  corr_lang_ci2=round(correl_lang$conf.int[2],digits=2),pval_lang=pval_lang,corr_fam=round(correl_fam$estimate,digits=2),
+                                  corr_fam_ci1=round(correl_fam$conf.int[1],digits=2),corr_fam_ci2=round(correl_fam$conf.int[2],digits=2),pval_fam=pval_fam,
+                                  n=length(which(!is.na(merged_sv$LanguageWeight)&!is.na(merged_sv$mean))),stringsAsFactors = F))
+table2si<-rbind(table2si,data.frame(dataset='SimVerb-3500',n_link=length(which(!is.na(merged_sv$mean))),
+                                perc_link=round(((length(which(!is.na(merged_sv$mean)))*100)/4228),digits=1),stringsAsFactors = F))
+
+##MEN dataset
+merged_men<-left_join(clics3,men,by=c('from_word'='word1','to_word'='word2'))  ##merging clics with MEN
+#compute the correlations
+correl_lang<-cor.test(merged_men$LanguageWeight,merged_men$mean)
+correl_fam<-cor.test(merged_men$FamilyWeight,merged_men$mean)
+pval_lang<-'<0.001' ##pvalue
+if(correl_lang$p.value>=0.001){pval_lang<-round(correl_lang$p.value,digits=3)}
+pval_fam<-'<0.001' ##pvalue
+if(correl_fam$p.value>=0.001){pval_fam<-round(correl_fam$p.value,digits=3)}
+table2<-rbind(table2,data.frame(dataset='MEN',corr_lang=round(correl_lang$estimate,digits=2),corr_lang_ci1=round(correl_lang$conf.int[1],digits=2),
+                                  corr_lang_ci2=round(correl_lang$conf.int[2],digits=2),pval_lang=pval_lang,corr_fam=round(correl_fam$estimate,digits=2),
+                                  corr_fam_ci1=round(correl_fam$conf.int[1],digits=2),corr_fam_ci2=round(correl_fam$conf.int[2],digits=2),pval_fam=pval_fam,
+                                 n=length(which(!is.na(merged_men$LanguageWeight)&!is.na(merged_men$mean))),stringsAsFactors = F))
+table2si<-rbind(table2si,data.frame(dataset='MEN',n_link=length(which(!is.na(merged_men$mean))),
+                                perc_link=round(((length(which(!is.na(merged_men$mean)))*100)/4228),digits=1),
+                                stringsAsFactors = F))
+
+##FastText
+merged<-left_join(clics3,cossim,by=c('from_word','to_word'))  ##merging clics with the FastText data
+#compute the correlations
+correl_lang<-cor.test(merged$LanguageWeight,merged$cossim)
+correl_fam<-cor.test(merged$FamilyWeight,merged$cossim)
+pval_lang<-'<0.001' ##pvalue
+if(correl_lang$p.value>=0.001){pval_lang<-round(correl_lang$p.value,digits=3)}
+pval_fam<-'<0.001' ##pvalue
+if(correl_fam$p.value>=0.001){pval_fam<-round(correl_fam$p.value,digits=3)}
+table2<-rbind(table2,data.frame(dataset='FastText',corr_lang=round(correl_lang$estimate,digits=2),corr_lang_ci1=round(correl_lang$conf.int[1],digits=2),
+                                  corr_lang_ci2=round(correl_lang$conf.int[2],digits=2),pval_lang=pval,corr_fam=round(correl_fam$estimate,digits=2),
+                                  corr_fam_ci1=round(correl_fam$conf.int[1],digits=2),corr_fam_ci2=round(correl_fam$conf.int[2],digits=2),pval_fam=pval_fam,
+                                  n=length(which(!is.na(merged$LanguageWeight)&!is.na(merged$cossim))),stringsAsFactors = F))
+table2si<-rbind(table2si,data.frame(dataset='FastText',n_link=length(which(!is.na(merged$cossim))),
+                                perc_link=round(((length(which(!is.na(merged$cossim)))*100)/4228),digits=1),stringsAsFactors = F))
+
+
+##MTurk annotations
+##computing correlations with the colexification strength
+correl_lang<-cor.test(mturk_results$LanguageWeight,mturk_results$mean)
+correl_fam<-cor.test(mturk_results$FamilyWeight,mturk_results$mean)
+pval_lang<-'<0.001' ##pvalue
+if(correl_lang$p.value>=0.001){pval_lang<-round(correl_lang$p.value,digits=3)}
+pval_fam<-'<0.001' ##pvalue
+if(correl_fam$p.value>=0.001){pval_fam<-round(correl_fam$p.value,digits=3)}
+##correlations with the mode of the annotations
+correl_lang_mode<-cor.test(mturk_results$LanguageWeight,mturk_results$mode)
+correl_fam_mode<-cor.test(mturk_results$FamilyWeight,mturk_results$mode)
+pval_lang_mode<-'<0.001' ##pvalue
+if(correl_lang_mode$p.value>=0.001){pval_lang_mode<-round(correl_lang_mode$p.value,digits=3)}
+pval_fam_mode<-'<0.001' ##pvalue
+if(correl_fam_mode$p.value>=0.001){pval_fam_mode<-round(correl_fam_mode$p.value,digits=3)}
+table3si<-rbind(table3si,data.frame(corr_lang=round(correl_lang_mode$estimate,digits=2),corr_lang_ci1=round(correl_lang_mode$conf.int[1],digits=2),
+                                    corr_lang_ci2=round(correl_lang_mode$conf.int[2],digits=2),pval_lang=pval_lang_mode,corr_fam=round(correl_fam_mode$estimate,digits=2),
+                                  corr_fam_ci1=round(correl_fam_mode$conf.int[1],digits=2),corr_fam_ci2=round(correl_fam_mode$conf.int[2],digits=2),pval_fam=pval_fam_mode,
+                                  n=length(which(!is.na(mturk_results$LanguageWeight)&!is.na(mturk_results$mode))),stringsAsFactors = F))
+table2<-rbind(table2,data.frame(dataset='Annotations',corr_lang=round(correl_lang$estimate,digits=2),corr_lang_ci1=round(correl_lang$conf.int[1],digits=2),
+                                  corr_lang_ci2=round(correl_lang$conf.int[2],digits=2),pval_lang=pval_lang,corr_fam=round(correl_fam$estimate,digits=2),
+                                  corr_fam_ci1=round(correl_fam$conf.int[1],digits=2),corr_fam_ci2=round(correl_fam$conf.int[2],digits=2),pval_fam=pval_fam,
+                                  n=length(which(!is.na(mturk_results$LanguageWeight)&!is.na(mturk_results$mean))),stringsAsFactors = F))
+table2si<-rbind(table2si,data.frame(dataset='Annotations',n_link=nrow(mturk_results),
+                                perc_link=round(((nrow(mturk_results)*100)/4228),digits=1),stringsAsFactors = F))
+
+table2
+table2si
+table3si
+
+```
+
+Table 3 - correlation of colexification strength with word association tasks
+Table 2 si rows 5,6 (SWOW and USF), second column (edges)
+```{r}
+table3<-data.frame(stringsAsFactors = F) ##initialising dataframe
+table2si<-data.frame(stringsAsFactors = F) ##initialising dataframe
+##SWOW
+merged<-left_join(clics3,SWW,by=c('from_word','to_word')) ##merging clics with SWOW
+#compute the correlations
+correl_lang<-cor.test(merged$LanguageWeight,merged$mean)
+correl_fam<-cor.test(merged$FamilyWeight,merged$mean)
+pval_lang<-'<0.001' ##pvalue
+if(correl_lang$p.value>=0.001){pval_lang<-round(correl_lang$p.value,digits=3)}
+pval_fam<-'<0.001' ##pvalue
+if(correl_fam$p.value>=0.001){pval_fam<-round(correl_fam$p.value,digits=3)}
+table3<-rbind(table3,data.frame(dataset='SWOW',corr_lang=round(correl_lang$estimate,digits=2),corr_lang_ci1=round(correl_lang$conf.int[1],digits=2),
+                                  corr_lang_ci2=round(correl_lang$conf.int[2],digits=2),pval_lang=pval_lang,corr_fam=round(correl_fam$estimate,digits=2),
+                                  corr_fam_ci1=round(correl_fam$conf.int[1],digits=2),corr_fam_ci2=round(correl_fam$conf.int[2],digits=2),pval_fam=pval_fam,
+                                n=length(which(!is.na(merged$LanguageWeight)&!is.na(merged$mean))),stringsAsFactors = F))
+table2si<-rbind(table2si,data.frame(dataset='SWOW',n_link=length(which(!is.na(merged$mean))),
+                                perc_link=round(((length(which(!is.na(merged$mean)))*100)/4228),digits=1),stringsAsFactors = F))
+
+##USF
+merged<-left_join(clics3,USF,by=c('from_word','to_word')) ##merging clics with SWOW
+#compute the correlations
+correl_lang<-cor.test(merged$LanguageWeight,merged$mean)
+correl_fam<-cor.test(merged$FamilyWeight,merged$mean)
+pval_lang<-'<0.001' ##pvalue
+if(correl_lang$p.value>=0.001){pval_lang<-round(correl_lang$p.value,digits=3)}
+pval_fam<-'<0.001' ##pvalue
+if(correl_fam$p.value>=0.001){pval_fam<-round(correl_fam$p.value,digits=3)}
+table3<-rbind(table3,data.frame(dataset='USF',corr_lang=round(correl_lang$estimate,digits=2),corr_lang_ci1=round(correl_lang$conf.int[1],digits=2),
+                                  corr_lang_ci2=round(correl_lang$conf.int[2],digits=2),pval_lang,corr_fam=round(correl_fam$estimate,digits=2),
+                                  corr_fam_ci1=round(correl_fam$conf.int[1],digits=2),corr_fam_ci2=round(correl_fam$conf.int[2],digits=2),pval_fam=pval_fam,
+                                n=length(which(!is.na(merged$LanguageWeight)&!is.na(merged$mean))),stringsAsFactors = F))
+table2si<-rbind(table2si,data.frame(dataset='USF',n_link=length(which(!is.na(merged$mean))),
+                                perc_link=round(((length(which(!is.na(merged$mean)))*100)/4228),digits=1),stringsAsFactors = F))
+
+
+table3
+table2si
+
+```
+
+Table 4 SI - Results on a common dataset (FastText, SWOW, annotations)
+```{r}
+table4si<-data.frame(stringsAsFactors = F) ##initialising dataframe for results
+data<-inputs[inputs$type=='real_pair'&inputs$in_clics==1,]
+##initialising columns for distances and cosine similarity
+data$cos_sim<-NA
+data$dist_lang<-NA
+data$dist_fam<-NA
+words = colnames(sim_lang) ##words in the similarity matrices
+for (i in seq(1,nrow(data))) #loop on simverb pairs
+{
+  from_word<-data$from_word[i]
+  to_word<-data$to_word[i]
+  cos_sim<-cossim$cossim[cossim$from_word==from_word&cossim$to_word==to_word]
+  if(length(cos_sim)>0){data$cos_sim[i]<-cos_sim}
+
+  if (from_word%in%words & to_word%in%words)
+  {
+    dist_lang<-log(mean(sim_lang[from_word,to_word],sim_lang[to_word,from_word])+1) #language distance
+    dist_fam<-log(mean(sim_fam[from_word,to_word],sim_fam[to_word,from_word])+1)   #family distance
+    if(length(dist_lang)>0)
+    {
+    data$dist_fam[i]<-dist_fam
+    data$dist_lang[i]<-dist_lang
+    }
+  }
+}
+data<-left_join(data,SWW[,c(1,2,5)],by=c('from_word','to_word')) ##adding the ratings from SWOW
+data<-data%>%rename(mean_rating=mean.x) ##renaming column
+data<-data%>%rename(mean_swow=mean.y) ##renaming column
+sel<-data[!is.na(data$mean_rating)&!is.na(data$LanguageWeight)&!is.na(data$mean_swow)&!is.na(data$dist_lang)&!is.na(data$cos_sim),] ##selecting only the word pairs that have data in each dataset
+
+corr_lang_annot<-cor.test(sel$mean_rating,sel$LanguageWeight)
+corr_fam_annot<-cor.test(sel$mean_rating,sel$FamilyWeight)
+corr_dist_lang_annot<-cor.test(sel$mean_rating,sel$dist_lang)
+corr_dist_fam_annot<-cor.test(sel$mean_rating,sel$dist_fam)
+pval_lang<-'<0.001' ##pvalue
+if(corr_lang_annot$p.value>=0.001){pval_lang<-round(corr_lang_annot$p.value,digits=3)}
+pval_fam<-'<0.001' ##pvalue
+if(corr_fam_annot$p.value>=0.001){pval_fam<-round(corr_fam_annot$p.value,digits=3)}
+pval_dist_lang<-'<0.001' ##pvalue
+if(corr_dist_lang_annot$p.value>=0.001){pval_dist_lang<-round(corr_dist_lang_annot$p.value,digits=3)}
+pval_dist_fam<-'<0.001' ##pvalue
+if(corr_dist_fam_annot$p.value>=0.001){pval_dist_fam<-round(corr_dist_fam_annot$p.value,digits=3)}
+table4si<-rbind(table4si,data.frame(dataset='Annotations',corr_lang=round(corr_lang_annot$estimate,digits=2),corr_lang_ci1=round(corr_lang_annot$conf.int[1],digits=2),
+                                  corr_lang_ci2=round(corr_lang_annot$conf.int[2],digits=2),pval_lang=pval_lang,corr_fam=round(corr_fam_annot$estimate,digits=2),
+                                  corr_fam_ci1=round(corr_fam_annot$conf.int[1],digits=2),corr_fam_ci2=round(corr_fam_annot$conf.int[2],digits=2),pval_fam=pval_fam,
+                                  corr_dist_lang=round(corr_dist_lang_annot$estimate,digits=2),corr_dist_lang_ci1=round(corr_dist_lang_annot$conf.int[1],digits=2),
+                                  corr_dist_lang_ci2=round(corr_dist_lang_annot$conf.int[2],digits=2),pval_dist_lang=pval_dist_lang, 
+                                  corr_dist_fam=round(corr_dist_fam_annot$estimate,digits=2),corr_dist_fam_ci1=round(corr_dist_fam_annot$conf.int[1],digits=2),
+                                  corr_dist_fam_ci2=round(corr_dist_fam_annot$conf.int[2],digits=2),pval_dist_fam=pval_dist_fam,stringsAsFactors = F))
+
+corr_lang_ft<-cor.test(sel$cos_sim,sel$LanguageWeight)
+corr_fam_ft<-cor.test(sel$cos_sim,sel$FamilyWeight)
+corr_dist_lang_ft<-cor.test(sel$cos_sim,sel$dist_lang)
+corr_dist_fam_ft<-cor.test(sel$cos_sim,sel$dist_fam)
+pval_lang<-'<0.001' ##pvalue
+if(corr_lang_ft$p.value>=0.001){pval_lang<-round(corr_lang_ft$p.value,digits=3)}
+pval_fam<-'<0.001' ##pvalue
+if(corr_fam_ft$p.value>=0.001){pval_fam<-round(corr_fam_ft$p.value,digits=3)}
+pval_dist_lang<-'<0.001' ##pvalue
+if(corr_dist_lang_ft$p.value>=0.001){pval_dist_lang<-round(corr_dist_lang_ft$p.value,digits=3)}
+pval_dist_fam<-'<0.001' ##pvalue
+if(corr_dist_fam_ft$p.value>=0.001){pval_dist_fam<-round(corr_dist_fam_ft$p.value,digits=3)}
+table4si<-rbind(table4si,data.frame(dataset='FastText',corr_lang=round(corr_lang_ft$estimate,digits=2),corr_lang_ci1=round(corr_lang_ft$conf.int[1],digits=2),
+                                  corr_lang_ci2=round(corr_lang_ft$conf.int[2],digits=2),pval_lang=pval_lang,corr_fam=round(corr_fam_ft$estimate,digits=2),
+                                  corr_fam_ci1=round(corr_fam_ft$conf.int[1],digits=2),corr_fam_ci2=round(corr_fam_ft$conf.int[2],digits=2),pval_fam=pval_fam,
+                                  corr_dist_lang=round(corr_dist_lang_ft$estimate,digits=2),corr_dist_lang_ci1=round(corr_dist_lang_ft$conf.int[1],digits=2),
+                                  corr_dist_lang_ci2=round(corr_dist_lang_ft$conf.int[2],digits=2),pval_dist_lang=pval_dist_lang,corr_dist_fam=round(corr_dist_fam_ft$estimate,digits=2),
+                                  corr_dist_fam_ci1=round(corr_dist_fam_ft$conf.int[1],digits=2),corr_dist_fam_ci2=round(corr_dist_fam_ft$conf.int[2],digits=2),
+                                  pval_dist_fam=pval_dist_fam,stringsAsFactors = F))
+
+
+corr_lang_swow<-cor.test(sel$mean_swow,sel$LanguageWeight)
+corr_fam_swow<-cor.test(sel$mean_swow,sel$FamilyWeight)
+corr_dist_lang_swow<-cor.test(sel$mean_swow,sel$dist_lang)
+corr_dist_fam_swow<-cor.test(sel$mean_swow,sel$dist_fam)
+pval_lang<-'<0.001' ##pvalue
+if(corr_lang_swow$p.value>=0.001){pval_lang<-round(corr_lang_swow$p.value,digits=3)}
+pval_fam<-'<0.001' ##pvalue
+if(corr_fam_swow$p.value>=0.001){pval_fam<-round(corr_fam_swow$p.value,digits=3)}
+pval_dist_lang<-'<0.001' ##pvalue
+if(corr_dist_lang_swow$p.value>=0.001){pval_dist_lang<-round(corr_dist_lang_swow$p.value,digits=3)}
+pval_dist_fam<-'<0.001' ##pvalue
+if(corr_dist_fam_swow$p.value>=0.001){pval_dist_fam<-round(corr_dist_fam_swow$p.value,digits=3)}
+table4si<-rbind(table4si,data.frame(dataset='SWOW',corr_lang=round(corr_lang_swow$estimate,digits=2),corr_lang_ci1=round(corr_lang_swow$conf.int[1],digits=2),
+                                  corr_lang_ci2=round(corr_lang_swow$conf.int[2],digits=2),pval_lang=pval_lang,corr_fam=round(corr_fam_swow$estimate,digits=2),
+                                  corr_fam_ci1=round(corr_fam_swow$conf.int[1],digits=2),corr_fam_ci2=round(corr_fam_swow$conf.int[2],digits=2),pval_fam=pval_fam,
+                                  corr_dist_lang=round(corr_dist_lang_swow$estimate,digits=2),corr_dist_lang_ci1=round(corr_dist_lang_swow$conf.int[1],digits=2),
+                                  corr_dist_lang_ci2=round(corr_dist_lang_swow$conf.int[2],digits=2),pval_dist_lang=pval_dist_lang,
+                                  corr_dist_fam=round(corr_dist_fam_swow$estimate,digits=2),corr_dist_fam_ci1=round(corr_dist_fam_swow$conf.int[1],digits=2),
+                                  corr_dist_fam_ci2=round(corr_dist_fam_swow$conf.int[2],digits=2),pval_dist_fam=pval_dist_fam,stringsAsFactors = F))
+
+table4si
+```
+
+NETWORK LEVEL
+
+Figure 3- correlation between distances and colexification weigths
+
+```{r}
+mturk_results<-inputs[inputs$type=='real_pair',] ##selecting data on the network
+
+mturk_results$dist_lang<-NA ##initialising vectors for the distances
+mturk_results$dist_fam<-NA
+words = colnames(sim_lang) ##words in the similarity matrices
+for (i in seq(1,nrow(mturk_results)))
+{
+  word1<-mturk_results$from_word[i] ##first word of the pair
+  word2<-mturk_results$to_word[i]   ##second word of the pair
+  ind1 = word1==words ##index of the word in the similarity matrix
+  ind2 = word2==words ##index of the word in the similarity matrix
+  if (sum(ind1)>0 & sum(ind2)>0) ##if we found the words in the distance matrix
+    {
+        ##computing the distance on languages
+        d1 = sim_lang[ind1, ind2]
+        d2 = sim_lang[ind2,ind1]
+        dist_lang = log(mean(d1, d2)+1) 
+        mturk_results$dist_lang[i]<-dist_lang ##storing distance
+        
+        ##computing the distance on families
+        d1 = sim_fam[ind1, ind2]
+        d2 = sim_fam[ind2,ind1]
+        dist_fam = log(mean(d1, d2)+1)
+        mturk_results$dist_fam[i]<-dist_fam ##storing distance
+      }
+}
+
+cor.test(mturk_results$dist_fam,mturk_results$dist_lang) ##correlation between distance on language and family
+cor.test(mturk_results$FamilyWeight,mturk_results$LanguageWeight)  ##correlation between language and family weights
+
+##scatterplots of the correlations
+plot(mturk_results$dist_fam,mturk_results$dist_lang,pch=20)
+
+plot(mturk_results$FamilyWeight,mturk_results$LanguageWeight,pch=20)
+```
+
+Table 4 - correlation of similarity data with distance on language weights (network level)
+Table 2 SI rows 1, 2, 3, 4, 7 (SimLex, SimVerb, MEN, FastText and MTurk annotations) third column - number of overlapping distances
+and Table 6 SI: correlation with the distance computed with family weights
+```{r}
+table4<-data.frame(stringsAsFactors = F) ##table with the results
+table2si<-data.frame(stringsAsFactors = F) ##table with the results
+table6si<-data.frame(stringsAsFactors = F) ##table with the results
+mturk_results<-inputs[inputs$type=='real_pair',] ##results of the MTurk task at the link level
+
+##SimLex-999
+merged<-data.frame(stringsAsFactors = F) ##data frame for simlex and distance data
+words = colnames(sim_lang) ##words in the similarity matrices
+for (i in seq(1,nrow(simlex))) #loop on simlex pairs
+{
+  if (simlex$word1[i]%in%words & simlex$word2[i]%in%words) ## if the words in simlex are also in the distance matrix
+  {
+    dist_lang<-log(mean(sim_lang[simlex$word1[i],simlex$word2[i]],sim_lang[simlex$word2[i],simlex$word1[i]])+1) #language distance
+    dist_fam<-log(mean(sim_fam[simlex$word1[i],simlex$word2[i]],sim_fam[simlex$word2[i],simlex$word1[i]])+1)   #family distance
+    if(dist_lang>0)
+    {merged<-rbind(merged,data.frame(word1=simlex$word1[i],word2=simlex$word2[i],dist_lang=dist_lang,dist_fam=dist_fam,sim=simlex$mean[i],stringsAsFactors = F))} ##storing results
+  }
+}
+correl_dist_lang<-cor.test(merged$dist_lang,merged$sim) ##correlation of similarity with distance on language weights
+correl_dist_fam<-cor.test(merged$dist_fam,merged$sim)  ##correlation of similarity with distance on family weights
+
+pval_dist_lang<-'<0.001' ##pvalue
+if(correl_dist_lang$p.value>=0.001){pval_dist_lang<-round(correl_dist_lang$p.value,digits=3)}
+pval_dist_fam<-'<0.001' ##pvalue
+if(correl_dist_fam$p.value>=0.001){pval_dist_fam<-round(correl_dist_fam$p.value,digits=3)}
+
+table4<-rbind(table4, data.frame(dataset='SimLex-999',corr_dist_lang=round(correl_dist_lang$estimate,digits=2),corr_dist_lang_ci1=round(correl_dist_lang$conf.int[1],digits=2),
+                                  corr_dist_lang_ci2=round(correl_dist_lang$conf.int[2],digits=2),pval_dist_lang=pval_dist_lang,
+                                 n=length(which(!is.na(merged$dist_lang)&!is.na(merged$sim))),stringsAsFactors = F))
+table2si<-rbind(table2si,data.frame(dataset='SimLex-999',n_dist=nrow(merged),perc_dist=round(((nrow(merged)*100)/1178989),digits=1),stringsAsFactors = F))
+table6si<-rbind(table6si,data.frame(dataset='SimLex-999',corr_dist_fam=round(correl_dist_fam$estimate,digits=2),corr_dist_fam_ci1=round(correl_dist_fam$conf.int[1],digits=2),
+                                    corr_dist_fam_ci2=round(correl_dist_fam$conf.int[2],digits=2),pval_dist_fam=pval_dist_fam,n=length(which(!is.na(merged$dist_lang)&!is.na(merged$sim))),
+                                    stringsAsFactors = F))
+
+##SimVerb-3500
+merged<-data.frame(stringsAsFactors = F) ##simverb and distance data
+words = colnames(sim_lang) ##words in the similarity matrices
+for (i in seq(1,nrow(simverb))) #loop on simverb pairs
+{
+  if (simverb$word1[i]%in%words & simverb$word2[i]%in%words)  ## if the words in simverb are also in the distance matrix
+  {
+    dist_lang<-log(mean(sim_lang[simverb$word1[i],simverb$word2[i]],sim_lang[simverb$word2[i],simverb$word1[i]])+1) #language distance
+    dist_fam<-log(mean(sim_fam[simverb$word1[i],simverb$word2[i]],sim_fam[simverb$word2[i],simverb$word1[i]])+1)   #family distance
+    if(dist_lang>0)
+    {merged<-rbind(merged,data.frame(word1=simverb$word1[i],word2=simverb$word2[i],dist_lang=dist_lang,dist_fam=dist_fam,sim=simverb$mean[i],stringsAsFactors = F))}  ##storing results
+  }
+}
+##computing correlations with distances
+correl_dist_lang<-cor.test(merged$dist_lang,merged$sim)
+correl_dist_fam<-cor.test(merged$dist_fam,merged$sim)
+
+pval_dist_lang<-'<0.001' ##pvalue
+if(correl_dist_lang$p.value>=0.001){pval_dist_lang<-round(correl_dist_lang$p.value,digits=3)}
+pval_dist_fam<-'<0.001' ##pvalue
+if(correl_dist_fam$p.value>=0.001){pval_dist_fam<-round(correl_dist_fam$p.value,digits=3)}
+table4<-rbind(table4, data.frame(dataset='SimVerb-3500',corr_dist_lang=round(correl_dist_lang$estimate,digits=2),corr_dist_lang_ci1=round(correl_dist_lang$conf.int[1],digits=2),
+                                  corr_dist_lang_ci2=round(correl_dist_lang$conf.int[2],digits=2),pval_dist_lang=pval_dist_lang,
+                                 n=length(which(!is.na(merged$dist_lang)&!is.na(merged$sim))),stringsAsFactors = F))
+table2si<-rbind(table2si,data.frame(dataset='SimVerb-3500',n_dist=nrow(merged),perc_dist=round(((nrow(merged)*100)/1178989),digits=1),stringsAsFactors = F))
+table6si<-rbind(table6si,data.frame(dataset='SimVerb-3500',corr_dist_fam=round(correl_dist_fam$estimate,digits=2),corr_dist_fam_ci1=round(correl_dist_fam$conf.int[1],digits=2),
+                                    corr_dist_fam_ci2=round(correl_dist_fam$conf.int[2],digits=2),pval_dist_fam=pval_dist_fam,n=length(which(!is.na(merged$dist_lang)&!is.na(merged$sim))),
+                                    stringsAsFactors = F))
+
+##MEN dataset
+merged<-data.frame(stringsAsFactors = F) ##men and distance data
+words = colnames(sim_lang) ##words in the similarity matrices
+for (i in seq(1,nrow(men))) #loop on men pairs
+{
+  if (men$word1[i]%in%words & men$word2[i]%in%words)   ## if the words in MEN are also in the distance matrix
+  {
+    dist_lang<-log(mean(sim_lang[men$word1[i],men$word2[i]],sim_lang[men$word2[i],men$word1[i]])+1) #language distance
+    dist_fam<-log(mean(sim_fam[men$word1[i],men$word2[i]],sim_fam[men$word2[i],men$word1[i]])+1)   #family distance
+    if(dist_lang>0)
+    {merged<-rbind(merged,data.frame(word1=men$word1[i],word2=men$word2[i],dist_lang=dist_lang,dist_fam=dist_fam,sim=men$mean[i],stringsAsFactors = F))} ##storing results
+  }
+}
+##computing correlations
+correl_dist_lang<-cor.test(merged$dist_lang,merged$sim)
+correl_dist_fam<-cor.test(merged$dist_fam,merged$sim)
+pval_dist_lang<-'<0.001' ##pvalue
+if(correl_dist_lang$p.value>=0.001){pval_dist_lang<-round(correl_dist_lang$p.value,digits=3)}
+pval_dist_fam<-'<0.001' ##pvalue
+if(correl_dist_fam$p.value>=0.001){pval_dist_fam<-round(correl_dist_fam$p.value,digits=3)}
+table4<-rbind(table4, data.frame(dataset='MEN',corr_dist_lang=round(correl_dist_lang$estimate,digits=2),corr_dist_lang_ci1=round(correl_dist_lang$conf.int[1],digits=2),
+                                  corr_dist_lang_ci2=round(correl_dist_lang$conf.int[2],digits=2),pval_dist_lang=pval_dist_lang,
+                                 n=length(which(!is.na(merged$dist_fam)&!is.na(merged$sim))),stringsAsFactors = F))
+table2si<-rbind(table2si,data.frame(dataset='MEN',n_dist=nrow(merged),perc_dist=round(((nrow(merged)*100)/1178989),digits=1),stringsAsFactors = F))
+table6si<-rbind(table6si,data.frame(dataset='MEN',corr_dist_fam=round(correl_dist_fam$estimate,digits=2),corr_dist_fam_ci1=round(correl_dist_fam$conf.int[1],digits=2),
+                                    corr_dist_fam_ci2=round(correl_dist_fam$conf.int[2],digits=2),pval_dist_fam=pval_dist_fam,n=length(which(!is.na(merged$dist_fam)&!is.na(merged$sim))),
+                                    stringsAsFactors = F))
+
+##FastText
+merged<-data.frame(stringsAsFactors = F) ##cosine similarity from FastText and distance data
+words = colnames(sim_lang) ##words in the similarity matrices
+for (i in seq(1,nrow(cossim))) #loop on FastText pairs
+{
+  if (cossim$from_word[i]%in%words & cossim$to_word[i]%in%words)  ##if the words are in the distance amtix
+  {
+    dist_lang<-log(mean(sim_lang[cossim$from_word[i],cossim$to_word[i]],sim_lang[cossim$to_word[i],cossim$from_word[i]])+1) #language distance
+    dist_fam<-log(mean(sim_fam[cossim$from_word[i],cossim$to_word[i]],sim_fam[cossim$to_word[i],cossim$from_word[i]])+1)   #family distance
+    if(dist_lang>0)
+    {merged<-rbind(merged,data.frame(word1=cossim$from_word[i],word2=cossim$to_word[i],dist_lang=dist_lang,dist_fam=dist_fam,sim=cossim$cossim[i],stringsAsFactors = F))} ##storing results
+  }
+}
+##computing correlations
+correl_dist_lang<-cor.test(merged$dist_lang,merged$sim)
+correl_dist_fam<-cor.test(merged$dist_fam,merged$sim)
+
+pval_dist_lang<-'<0.001' ##pvalue
+if(correl_dist_lang$p.value>=0.001){pval_dist_lang<-round(correl_dist_lang$p.value,digits=3)}
+pval_dist_fam<-'<0.001' ##pvalue
+if(correl_dist_fam$p.value>=0.001){pval_dist_fam<-round(correl_dist_fam$p.value,digits=3)}
+table4<-rbind(table4, data.frame(dataset='FastText',corr_dist_lang=round(correl_dist_lang$estimate,digits=2),corr_dist_lang_ci1=round(correl_dist_lang$conf.int[1],digits=2),
+                                  corr_dist_lang_ci2=round(correl_dist_lang$conf.int[2],digits=2),pval_dist_lang=pval_dist_lang,
+                                 n=length(which(!is.na(merged$dist_lang)&!is.na(merged$sim))),stringsAsFactors = F))
+table2si<-rbind(table2si,data.frame(dataset='FastText',n_dist=nrow(merged),perc_dist=round(((nrow(merged)*100)/1178989),digits=1),stringsAsFactors = F))
+table6si<-rbind(table6si,data.frame(dataset='FastText',corr_dist_fam=round(correl_dist_fam$estimate,digits=2),
+                                  corr_dist_fam_ci1=round(correl_dist_fam$conf.int[1],digits=2),corr_dist_fam_ci2=round(correl_dist_fam$conf.int[2],digits=2),pval_dist_fam=pval_dist_fam,
+                                  n=length(which(!is.na(merged$dist_lang)&!is.na(merged$sim))),stringsAsFactors = F))
+
+
+##MTurk annotations
+##adding the distance to the dataframe
+##initialising the distance columns
+mturk_results$dist_lang<-NA 
+mturk_results$dist_fam<-NA
+words = colnames(sim_lang) ##words in the similarity matrices
+for (i in seq(1,nrow(mturk_results)))
+{
+  word1<-mturk_results$from_word[i] ##first word of the pair
+  word2<-mturk_results$to_word[i]   ##second word of the pair
+  ind1 = word1==words ##index of the word in the similarity matrix
+  ind2 = word2==words ##index of the word in the similarity matrix
+  if (sum(ind1)>0 & sum(ind2)>0) ##if we found the words in the distance matrix
+    {
+        ##computing the distance on languages
+        d1 = sim_lang[ind1, ind2]
+        d2 = sim_lang[ind2,ind1]
+        dist_lang = log(mean(d1, d2)+1) 
+        mturk_results$dist_lang[i]<-dist_lang ##storing distance
+        
+        ##computing the distance on families
+        d1 = sim_fam[ind1, ind2]
+        d2 = sim_fam[ind2,ind1]
+        dist_fam = log(mean(d1, d2)+1)
+        mturk_results$dist_fam[i]<-dist_fam ##storing distance
+      }
+}
+##computing the correlations with the distances
+correl_dist_lang<-cor.test(mturk_results$dist_lang,mturk_results$mean)
+correl_dist_fam<-cor.test(mturk_results$dist_fam,mturk_results$mean)
+##cocor tests
+cocor(~dist_lang+mean|LanguageWeight+mean,data=mturk_results,alternative='greater')
+pval_dist_lang<-'<0.001' ##pvalue
+if(correl_dist_lang$p.value>=0.001){pval_dist_lang<-round(correl_dist_lang$p.value,digits=3)}
+pval_dist_fam<-'<0.001' ##pvalue
+if(correl_dist_fam$p.value>=0.001){pval_dist_fam<-round(correl_dist_fam$p.value,digits=3)}
+table4<-rbind(table4, data.frame(dataset='Annotations',corr_dist_lang=round(correl_dist_lang$estimate,digits=2),corr_dist_lang_ci1=round(correl_dist_lang$conf.int[1],digits=2),
+                                  corr_dist_lang_ci2=round(correl_dist_lang$conf.int[2],digits=2),pval_dist_lang=pval_dist_lang,
+                                 n=length(which(!is.na(mturk_results$dist_fam)&!is.na(mturk_results$mean))),stringsAsFactors = F))
+table2si<-rbind(table2si,data.frame(dataset='Annotations',n_dist=nrow(mturk_results),perc_dist=round(((nrow(mturk_results)*100)/1178989),digits=1),stringsAsFactors = F))
+table6si<-rbind(table6si,data.frame(dataset='Annotations',corr_dist_fam=round(correl_dist_fam$estimate,digits=2),
+                                  corr_dist_fam_ci1=round(correl_dist_fam$conf.int[1],digits=2),corr_dist_fam_ci2=round(correl_dist_fam$conf.int[2],digits=2),pval_dist_fam=pval_dist_fam,
+                                    n=length(which(!is.na(mturk_results$dist_fam)&!is.na(mturk_results$mean))),stringsAsFactors = F))
+
+table4
+table2si
+table6si
+
+```
+
+Table 2 SI rows 5,6 (USF, SWOW) third column - number of overlapping distances
+
+```{r}
+table2si<-data.frame(stringsAsFactors = F) ##initialising dataframe
+##SWOW
+SWW$dist_lang<-NA ##initialising the distance columns
+SWW$dist_fam<-NA
+words = colnames(sim_lang) ##words in the similarity matrices
+for (i in seq(1,nrow(SWW)))
+{
+  word1<-as.character(SWW$from_word[i]) ##first word of the pair
+  word2<-as.character(SWW$to_word[i])   ##second word of the pair
+  ind1 = word1==words ##index of the word in the similarity matrix
+  ind2 = word2==words ##index of the word in the similarity matrix
+  if (sum(ind1)>0 & sum(ind2)>0) ##if we found the words in the distance matrix
+    {
+        d1 = sim_lang[ind1, ind2]
+        d2 = sim_lang[ind2,ind1]
+        dist_lang = log(mean(d1, d2)+1) ##mean of the distances
+        SWW$dist_lang[i]<-dist_lang
+
+        d1 = sim_fam[ind1, ind2]
+        d2 = sim_fam[ind2,ind1]
+        dist_fam = log(mean(d1, d2)+1) ##mean of the distances
+        SWW$dist_fam[i]<-dist_fam
+      }
+}
+
+table2si<-rbind(table2si,data.frame(dataset='SWOW',n_dist=length(which(!is.na(SWW$dist_fam)&!is.na(SWW$mean))),perc_dist=round(((length(which(!is.na(SWW$dist_fam)&!is.na(SWW$mean)))*100)/1178989),digits=1),stringsAsFactors = F))
+
+
+##USF
+for (i in seq(1,nrow(USF)))
+{
+  word1<-as.character(USF$from_word[i]) ##first word of the pair
+  word2<-as.character(USF$to_word[i])   ##second word of the pair
+  ind1 = word1==words ##index of the word in the similarity matrix
+  ind2 = word2==words ##index of the word in the similarity matrix
+  if (sum(ind1)>0 & sum(ind2)>0) ##if we found the words in the distance matrix
+    {
+        d1 = sim_lang[ind1, ind2]
+        d2 = sim_lang[ind2,ind1]
+        dist_lang = log(mean(d1, d2)+1) ##mean of the distances
+        USF$dist_lang[i]<-dist_lang
+
+        d1 = sim_fam[ind1, ind2]
+        d2 = sim_fam[ind2,ind1]
+        dist_fam = log(mean(d1, d2)+1) ##mean of the distances
+        USF$dist_fam[i]<-dist_fam
+      }
+}
+merged<-left_join(USF,clics3,by=c('from_word','to_word'))
+
+table2si<-rbind(table2si,data.frame(dataset='USF',n_dist=length(which(!is.na(USF$dist_fam)&!is.na(USF$mean))),perc_dist=round(((length(which(!is.na(USF$dist_fam)&!is.na(USF$mean)))*100)/1178989),digits=1),stringsAsFactors = F))
+
+table2si
+
+```
+
+Table 5 - correlation of word association tasks and distance on language weights
+Table 7 SI - correlation of association tasks data and distance on family weights
+
+```{r}
+##SWOW
+SWW$dist_lang<-NA ##initialising the distance columns
+SWW$dist_fam<-NA
+table5<-data.frame(stringsAsFactors = F) ##initialising data frame for results
+table7si<-data.frame(stringsAsFactors = F) ##initialising data frame for results
+words = colnames(sim_lang) ##words in the similarity matrices
+for (i in seq(1,nrow(SWW)))
+{
+  word1<-as.character(SWW$from_word[i]) ##first word of the pair
+  word2<-as.character(SWW$to_word[i])   ##second word of the pair
+  ind1 = word1==words ##index of the word in the similarity matrix
+  ind2 = word2==words ##index of the word in the similarity matrix
+  if (sum(ind1)>0 & sum(ind2)>0) ##if we found the words in the distance matrix
+    {
+        d1 = sim_lang[ind1, ind2]
+        d2 = sim_lang[ind2,ind1]
+        dist_lang = log(mean(d1, d2)+1) ##mean of the distances
+        SWW$dist_lang[i]<-dist_lang
+
+        d1 = sim_fam[ind1, ind2]
+        d2 = sim_fam[ind2,ind1]
+        dist_fam = log(mean(d1, d2)+1) ##mean of the distances
+        SWW$dist_fam[i]<-dist_fam
+      }
+}
+cor_dist_lang<-cor.test(SWW$mean,SWW$dist_lang)
+cor_dist_fam<-cor.test(SWW$mean,SWW$dist_fam)
+
+pval_dist_lang<-'<0.001' ##pvalue
+if(cor_dist_lang$p.value>=0.001){pval_dist_lang<-round(cor_dist_lang$p.value,digits=3)}
+pval_dist_fam<-'<0.001' ##pvalue
+if(cor_dist_fam$p.value>=0.001){pval_dist_fam<-round(cor_dist_fam$p.value,digits=3)}
+table5<-rbind(table5, data.frame(dataset='SWOW',corr_dist_lang=round(cor_dist_lang$estimate,digits=2),corr_dist_lang_ci1=round(cor_dist_lang$conf.int[1],digits=2),
+                                  corr_dist_lang_ci2=round(cor_dist_lang$conf.int[2],digits=2),pval_dist_lang=pval_dist_lang, n=length(which(!is.na(SWW$dist_fam)&!is.na(SWW$mean))),
+                                 stringsAsFactors = F))
+table7si<-rbind(table7si, data.frame(dataset='SWOW',corr_dist_fam=round(cor_dist_fam$estimate,digits=2),corr_dist_fam_ci1=round(cor_dist_fam$conf.int[1],digits=2),
+                                  corr_dist_fam_ci2=round(cor_dist_fam$conf.int[2],digits=2),pval_dist_fam=pval_dist_fam, n=length(which(!is.na(SWW$dist_fam)&!is.na(SWW$mean))),
+                                 stringsAsFactors = F))
+
+##USF
+for (i in seq(1,nrow(USF)))
+{
+  word1<-as.character(USF$from_word[i]) ##first word of the pair
+  word2<-as.character(USF$to_word[i])   ##second word of the pair
+  ind1 = word1==words ##index of the word in the similarity matrix
+  ind2 = word2==words ##index of the word in the similarity matrix
+  if (sum(ind1)>0 & sum(ind2)>0) ##if we found the words in the distance matrix
+    {
+        d1 = sim_lang[ind1, ind2]
+        d2 = sim_lang[ind2,ind1]
+        dist_lang = log(mean(d1, d2)+1) ##mean of the distances
+        USF$dist_lang[i]<-dist_lang
+
+        d1 = sim_fam[ind1, ind2]
+        d2 = sim_fam[ind2,ind1]
+        dist_fam = log(mean(d1, d2)+1) ##mean of the distances
+        USF$dist_fam[i]<-dist_fam
+      }
+}
+cor_dist_lang<-cor.test(USF$mean,USF$dist_lang)
+cor_dist_fam<-cor.test(USF$mean,USF$dist_fam)
+pval_dist_lang<-'<0.001' ##pvalue
+if(cor_dist_lang$p.value>=0.001){pval_dist_lang<-round(cor_dist_lang$p.value,digits=3)}
+pval_dist_fam<-'<0.001' ##pvalue
+if(cor_dist_fam$p.value>=0.001){pval_dist_fam<-round(cor_dist_fam$p.value,digits=3)}
+table5<-rbind(table5, data.frame(dataset='USF',corr_dist_lang=round(cor_dist_lang$estimate,digits=2),corr_dist_lang_ci1=round(cor_dist_lang$conf.int[1],digits=2),
+                                  corr_dist_lang_ci2=round(cor_dist_lang$conf.int[2],digits=2),pval_dist_lang=pval_dist_lang, n=length(which(!is.na(USF$dist_fam)&!is.na(USF$mean))),
+                                 stringsAsFactors = F))
+table7si<-rbind(table7si, data.frame(dataset='USF',corr_dist_fam=round(cor_dist_fam$estimate,digits=2),corr_dist_fam_ci1=round(cor_dist_fam$conf.int[1],digits=2),
+                                  corr_dist_fam_ci2=round(cor_dist_fam$conf.int[2],digits=2),pval_dist_fam=pval_dist_fam, n=length(which(!is.na(USF$dist_fam)&!is.na(USF$mean))),
+                                 stringsAsFactors = F))
+table5
+table7si
+```
+
+
+Table 6 - linear regression models for distance on the language weights (network level)
+
+```{r}
+mturk_results<-inputs[inputs$type=='real_pair',] ##results of the MTurk task at the network level
+##adding the distance to the mturk results
+mturk_results$dist_lang<-NA ##initialising the distance columns
+mturk_results$dist_fam<-NA
+words = colnames(sim_lang) ##words in the similarity matrices
+for (i in seq(1,nrow(mturk_results)))
+{
+  word1<-mturk_results$from_word[i] ##first word of the pair
+  word2<-mturk_results$to_word[i]   ##second word of the pair
+  ind1 = word1==words ##index of the word in the similarity matrix
+  ind2 = word2==words ##index of the word in the similarity matrix
+  if (sum(ind1)>0 & sum(ind2)>0) ##if we found the words in the distance matrix
+    {
+        d1 = sim_lang[ind1, ind2]
+        d2 = sim_lang[ind2,ind1]
+        dist_lang = log(mean(d1, d2)+1) ##mean of the distances
+        mturk_results$dist_lang[i]<-dist_lang
+
+        d1 = sim_fam[ind1, ind2]
+        d2 = sim_fam[ind2,ind1]
+        dist_fam = log(mean(d1, d2)+1) ##mean of the distances
+        mturk_results$dist_fam[i]<-dist_fam
+      }
+}
+
+mturk_results<-left_join(mturk_results,cossim,by=c('from_word','to_word')) ##adding cosine similarity from FastText
+
+full_model<-lm(mturk_results$mean~scale(mturk_results$cossim)+scale(mturk_results$dist_lang)) ##model with FastText data and distance
+only_ft<-lm(mturk_results$mean~scale(mturk_results$cossim)) ##model with only FastText cosine similarities
+only_dist<-lm(mturk_results$mean~scale(mturk_results$dist_lang)) ##model with only distance
+##printing the results
+summary(full_model)
+summary(only_ft)
+summary(only_dist)
+##for LaTeX table:
+# library(texreg)
+# texreg(list(full_model,only_ft,only_dist))
+##for likelihood ratio test
+lrtest(full_model, only_ft)
+```
+
+Table 8 SI - linear regression models for distance on the family weights (network level)
+
+```{r}
+mturk_results<-inputs[inputs$type=='real_pair',] ##results of the MTurk task at the network level
+##adding the distance to the mturk results
+mturk_results$dist_lang<-NA ##initialising the distance columns
+mturk_results$dist_fam<-NA
+words = colnames(sim_lang) ##words in the similarity matrices
+for (i in seq(1,nrow(mturk_results)))
+{
+  word1<-mturk_results$from_word[i] ##first word of the pair
+  word2<-mturk_results$to_word[i]   ##second word of the pair
+  ind1 = word1==words ##index of the word in the similarity matrix
+  ind2 = word2==words ##index of the word in the similarity matrix
+  if (sum(ind1)>0 & sum(ind2)>0) ##if we found the words in the distance matrix
+    {
+        d1 = sim_lang[ind1, ind2]
+        d2 = sim_lang[ind2,ind1]
+        dist_lang = log(mean(d1, d2)+1) ##mean of the distances
+        mturk_results$dist_lang[i]<-dist_lang
+
+        d1 = sim_fam[ind1, ind2]
+        d2 = sim_fam[ind2,ind1]
+        dist_fam = log(mean(d1, d2)+1) ##mean of the distances
+        mturk_results$dist_fam[i]<-dist_fam
+      }
+}
+
+mturk_results<-left_join(mturk_results,cossim,by=c('from_word','to_word')) ##adding cosine similarity from FastText
+
+full_model<-lm(mturk_results$mean~scale(mturk_results$cossim)+scale(mturk_results$dist_fam)) ##model with FastText data and distance
+only_ft<-lm(mturk_results$mean~scale(mturk_results$cossim)) ##model with only FastText cosine similarities
+only_dist<-lm(mturk_results$mean~scale(mturk_results$dist_fam)) ##model with only distance
+##printing the results
+summary(full_model)
+summary(only_ft)
+summary(only_dist)
+##for LaTeX table:
+# library(texreg)
+# texreg(list(full_model,only_ft,only_dist))
+##for likelihood ratio test
+lrtest(full_model, only_ft)
+```
+
+THRESHOLD FOR NOISE
+
+Figure 4 - Estimation of the threshold for noise
+
+```{r}
+data<-inputs[inputs$type=='real_pair'&inputs$in_clics==1,] ##MTurk results on Clics3
+
+#####language weights and bootstrapping
+M<-1000 ##bootstrap repetitions
+perc_high<-c() ##vector of the percentage of votes for high similarity
+boot_data<-data.frame(stringsAsFactors = F) ##dataframes for bootstraps
+boot_stats<-data.frame(stringsAsFactors = F)
+  for (i in sort(unique(data$LanguageWeight)))##loop on the language weights
+  {
+    # print(i)
+    for(j in 1:M) ##bootstrap repetitions
+    {
+    all_votes<-unlist(data$output[data$LanguageWeight>=i]) ##all the votes for colexifications that occur in at least i languages
+    which_high<-length(which(all_votes>=4)) ##number of votes for high similarity
+    perc_high<-c(perc_high,which_high/length(all_votes)) ##percentage of votes for high similarity out of all votes
+  
+    BootSample<-sample(all_votes,replace=T) ##bootstrap sample
+    which_high_boot<-length(which(BootSample>=4)) ##number of votes for high similarity
+    boot_data<-rbind(boot_data,data.frame(perc=which_high_boot/length(all_votes),th=i,stringsAsFactors = F)) ##percentage of votes fro high similarity out of all votes
+    }
+    s<-sd(boot_data$perc[boot_data$th==i]) ##standard deviation
+    n<-length(boot_data$perc[boot_data$th==i]) ##number of observations
+    margin<-qt(0.975,df=n-1)*s/sqrt(n) ##95% ci
+    m<-mean(boot_data$perc[boot_data$th==i]) ##mean
+    boot_stats<-rbind(boot_stats,data.frame(real=which_high/length(all_votes),mean=m,ci1=m-margin,ci2=m+margin,th=i,n=length(all_votes)),stringsAsFactors = F)
+  }
+
+
+##plot of the results in the case of language weights
+
+ggplot(boot_stats, aes(x=th, y=real)) + 
+    geom_ribbon(aes(ymin=ci1, ymax=ci2), alpha=0.3) +
+  geom_line()+
+    geom_point()+ylim(0.4,1.0)+
+   geom_hline(yintercept=0.5,color='red')+
+  geom_vline(xintercept =7,color='grey',alpha=0.7)+
+  theme_bw()
+
+##plot of the distributions of observations with respect to the thresholds
+barplot_data<-data.frame(stringsAsFactors =F )
+for (i in sort(unique(data$LanguageWeight)))##loop on the language weights
+  {
+    all_votes<-unlist(data$output[data$LanguageWeight>=i])
+    barplot_data<-rbind(barplot_data,data.frame(n=length(all_votes),th=i,stringsAsFactors = F))
+}
+
+ggplot(barplot_data, aes(x=th, y=log(n))) + 
+  geom_line()+
+    geom_point()+theme_bw()
+
+
+#####language weights and bootstrapping
+M<-1000 ##repetitions of bootstrapping
+perc_high<-c() ##vector of the percentage of votes for high similarity
+boot_data<-data.frame(stringsAsFactors = F)##dataframes for bootstraps
+boot_stats<-data.frame(stringsAsFactors = F)
+  for (i in sort(unique(data$FamilyWeight)))##loop on the family weights
+  {
+    # print(i)
+    for(j in 1:M) ##loop on the bootstrap repetitions
+    {
+    all_votes<-unlist(data$output[data$FamilyWeight>=i]) ##all the votes for colexifications that occur in at least i languages
+    which_high<-length(which(all_votes>=4)) ##number of votes for high similarity
+    perc_high<-c(perc_high,which_high/length(all_votes)) ##percentage of votes for high similarity out of all votes
+  
+    BootSample<-sample(all_votes,replace=T) ##bootstrap sample
+    which_high_boot<-length(which(BootSample>=4)) ##number of votes for high similarity
+    boot_data<-rbind(boot_data,data.frame(perc=which_high_boot/length(all_votes),th=i,stringsAsFactors = F)) ##percentage of votes fro high similarity out of all votes
+    }
+    s<-sd(boot_data$perc[boot_data$th==i]) ##standard deviation
+    n<-length(boot_data$perc[boot_data$th==i]) ##number of observations
+    margin<-qt(0.975,df=n-1)*s/sqrt(n) ##95% ci
+    m<-mean(boot_data$perc[boot_data$th==i]) ##mean
+    boot_stats<-rbind(boot_stats,data.frame(real=which_high/length(all_votes),mean=m,ci1=m-margin,ci2=m+margin,th=i),stringsAsFactors = F)
+}
+##plot of the results with respect to family weights
+ggplot(boot_stats, aes(x=th, y=real)) + 
+    geom_ribbon(aes(ymin=ci1, ymax=ci2), alpha=0.3) +
+  geom_line()+
+    geom_point()+ylim(0.4,1.0)+
+   geom_hline(yintercept=0.5,color='red')+
+  geom_vline(xintercept =5,color='grey',alpha=0.7)+
+  theme_bw()
+
+##plot of the distributions of observations with respect to the thresholds
+barplot_data<-data.frame(stringsAsFactors =F )
+for (i in sort(unique(data$FamilyWeight)))##loop on the family weights
+  {
+    all_votes<-unlist(data$output[data$FamilyWeight>=i])
+    barplot_data<-rbind(barplot_data,data.frame(n=length(all_votes),th=i,stringsAsFactors = F))
+}
+
+ggplot(barplot_data, aes(x=th, y=log(n))) + 
+  geom_line()+
+    geom_point()+theme_bw()
+
+```
+
+Figure 3 SI - estimation of the threshold for noise in the case of a relaxation of the definition of similarity
+
+```{r}
+data<-inputs[inputs$type=='real_pair'&inputs$in_clics==1,] ##MTurk results on Clics3
+
+#####language weights and bootstrapping
+M<-1000 ##bootstrap repetitions
+perc_high<-c() ##vector of the percentage of votes for high similarity
+boot_data<-data.frame(stringsAsFactors = F) ##dataframes for bootstraps
+boot_stats<-data.frame(stringsAsFactors = F)
+  for (i in sort(unique(data$LanguageWeight)))##loop on the language weights
+  {
+    # print(i)
+    for(j in 1:M) ##bootstrap repetitions
+    {
+    all_votes<-unlist(data$output[data$LanguageWeight>=i]) ##all the votes for colexifications that occur in at least i languages
+    which_high<-length(which(all_votes>=3)) ##number of votes for high similarity
+    perc_high<-c(perc_high,which_high/length(all_votes)) ##percentage of votes for high similarity out of all votes
+  
+    BootSample<-sample(all_votes,replace=T) ##bootstrap sample
+    which_high_boot<-length(which(BootSample>=3)) ##number of votes for high similarity
+    boot_data<-rbind(boot_data,data.frame(perc=which_high_boot/length(all_votes),th=i,stringsAsFactors = F)) ##percentage of votes fro high similarity out of all votes
+    }
+    s<-sd(boot_data$perc[boot_data$th==i]) ##standard deviation
+    n<-length(boot_data$perc[boot_data$th==i]) ##number of observations
+    margin<-qt(0.975,df=n-1)*s/sqrt(n) ##95% ci
+    m<-mean(boot_data$perc[boot_data$th==i]) ##mean
+    boot_stats<-rbind(boot_stats,data.frame(real=which_high/length(all_votes),mean=m,ci1=m-margin,ci2=m+margin,th=i,n=length(all_votes)),stringsAsFactors = F)
+  }
+
+
+##plot of the results in the case of language weights
+
+ggplot(boot_stats, aes(x=th, y=real)) + 
+    geom_ribbon(aes(ymin=ci1, ymax=ci2), alpha=0.3) +
+  geom_line()+
+    geom_point()+ylim(0.4,1.0)+
+   geom_hline(yintercept=0.5,color='red')+
+  theme_bw()
+
+
+
+#####language weights and bootstrapping
+M<-1000 ##repetitions of bootstrapping
+perc_high<-c() ##vector of the percentage of votes for high similarity
+boot_data<-data.frame(stringsAsFactors = F)##dataframes for bootstraps
+boot_stats<-data.frame(stringsAsFactors = F)
+  for (i in sort(unique(data$FamilyWeight)))##loop on the family weights
+  {
+    # print(i)
+    for(j in 1:M) ##loop on the bootstrap repetitions
+    {
+    all_votes<-unlist(data$output[data$FamilyWeight>=i]) ##all the votes for colexifications that occur in at least i languages
+    which_high<-length(which(all_votes>=3)) ##number of votes for high similarity
+    perc_high<-c(perc_high,which_high/length(all_votes)) ##percentage of votes for high similarity out of all votes
+  
+    BootSample<-sample(all_votes,replace=T) ##bootstrap sample
+    which_high_boot<-length(which(BootSample>=3)) ##number of votes for high similarity
+    boot_data<-rbind(boot_data,data.frame(perc=which_high_boot/length(all_votes),th=i,stringsAsFactors = F)) ##percentage of votes fro high similarity out of all votes
+    }
+    s<-sd(boot_data$perc[boot_data$th==i]) ##standard deviation
+    n<-length(boot_data$perc[boot_data$th==i]) ##number of observations
+    margin<-qt(0.975,df=n-1)*s/sqrt(n) ##95% ci
+    m<-mean(boot_data$perc[boot_data$th==i]) ##mean
+    boot_stats<-rbind(boot_stats,data.frame(real=which_high/length(all_votes),mean=m,ci1=m-margin,ci2=m+margin,th=i),stringsAsFactors = F)
+}
+##plot of the results with respect to family weights
+ggplot(boot_stats, aes(x=th, y=real)) + 
+    geom_ribbon(aes(ymin=ci1, ymax=ci2), alpha=0.3) +
+  geom_line()+
+    geom_point()+ylim(0.4,1.0)+
+   geom_hline(yintercept=0.5,color='red')+
+  theme_bw()
+
+
+```
+
+
+Figure 5 - heatmaps of the MTurk annotations
+
+```{r}
+##heatmap binned with 10% pairs per bin (language weight)
+df_wlweights<-data.frame(stringsAsFactors = F) ##initialising dataframe
+data<-inputs[inputs$type=='real_pair'&inputs$in_clics==1,] ##MTurk results on Clics3
+data<-data[order(data$LanguageWeight),] ##order according to language weight
+data$bin<-NA ##initializing the bins
+ind<-seq(1,nrow(data),length.out=11)  #10 bins
+for(i in seq(1,length(ind)-1))
+{data$bin[floor(ind[i]):floor(ind[i+1])]<-i} ##assign the bin number to each entry
+##getting annotations per bin
+for(i in sort(unique(data$bin)))
+{
+  ratings<-unlist(data$output[data$bin==i])  ##getting the annotations
+  ratings<-ratings[-which(ratings=="dunno")] ##removing the answers for pairs of words the annotators were not familiar with
+  df_wlweights<-rbind(df_wlweights,data.frame(ratings=ratings,bin=rep(i,length(ratings)),stringsAsFactors = F))
+}
+datal<-as.matrix(table(df_wlweights))
+rescaled_data<-apply(datal, 2, function(x)(x/(sum(x))))##rescale the counts by row
+colnames(rescaled_data)<-sort(unique(data$bin)) ##setting column names
+###Plotting the heatmap
+heatmap(rescaled_data, scale="none",Rowv = NA,Colv=NA, col= colorRampPalette(brewer.pal(9, "YlOrRd"))(25)) ##heatmap with 10% language bins
+legend(x="bottomright", legend=c("0%", "25%", "50%","75%","100%"), fill=colorRampPalette(brewer.pal(9, "YlOrRd"))(5))
+
+
+##family weights
+df_wfweights<-data.frame(stringsAsFactors = F) ##initialising dataframe
+data<-inputs[inputs$type=='real_pair'&inputs$in_clics==1,] ##MTurk results on Clics3
+data<-data[order(data$FamilyWeight),] ##order according to language weight
+data$bin<-NA ##initializing the bins
+ind<-seq(1,nrow(data),length.out=11)  #10 bins
+for(i in seq(1,length(ind)-1))
+{data$bin[floor(ind[i]):floor(ind[i+1])]<-i} ##assign the bin number to each entry
+##getting annotations per bin
+for(i in sort(unique(data$bin)))
+{
+  ratings<-unlist(data$output[data$bin==i])  ##getting the annotations
+  ratings<-ratings[-which(ratings=="dunno")] ##removing the answers for pairs of words the annotators were not familiar with
+  df_wfweights<-rbind(df_wfweights,data.frame(ratings=ratings,bin=rep(i,length(ratings)),stringsAsFactors = F))
+}
+dataf<-as.matrix(table(df_wfweights))
+rescaled_data<-apply(dataf, 2, function(x)(x/(sum(x))))##rescale the counts by row
+colnames(rescaled_data)<-sort(unique(data$bin)) ##setting column names
+###Plotting the heatmap
+heatmap(rescaled_data, scale="none",Rowv = NA,Colv=NA, col= colorRampPalette(brewer.pal(9, "YlOrRd"))(25)) ##heatmap with 10% language bins
+legend(x="bottomright", legend=c("0%", "25%", "50%","75%","100%"), fill=colorRampPalette(brewer.pal(9, "YlOrRd"))(5))
+```
+
+
+Figure 4 SI - heatmaps with distances
+
+```{r}
+##heatmaps according to distance
+##distance on language weigths
+##adding distance data
+data<-inputs[inputs$type=='real_pair',] ##MTurk results
+data$lang_dist<-NA ##initialising columns for distances
+data$fam_dist<-NA
+#adding distance
+for (i in seq(1,nrow(data))) 
+{
+  word1<-data$from_word[i]
+  word2<-data$to_word[i]
+  data$lang_dist[i]<-log(mean(sim_lang[word1,word2],sim_lang[word2,word1])+1) #language distance
+  data$fam_dist[i]<-log(mean(sim_fam[word1,word2],sim_fam[word2,word1])+1)   #family distance
+  }
+
+##heatmap binned with 10% data per bin (language distance)
+data$bin<-NA ##initializing the bins
+data<-data[order(data$lang_dist),]  ##order according to language distance
+ind<-seq(1,nrow(data),length.out=11) ##10 bins
+for(i in seq(1,length(ind)-1))
+{ data$bin[floor(ind[i]):floor(ind[i+1])]<-i}  ##assign the bin number to each entry
+df<-data.frame(stringsAsFactors = F)
+for(i in sort(unique(data$bin)))
+{
+  ratings<-unlist(data$output[data$bin==i]) ##getting annotations
+  ratings<-ratings[-which(ratings=="dunno")] ##removing the answers for pairs of words the annotators were not familiar with
+  df<-rbind(df,data.frame(ratings=ratings,bin=rep(i,length(ratings)),stringsAsFactors = F))
+}
+data_ld<-as.matrix(table(df))
+colnames(data_ld)<-sort(unique(data$bin))
+rescaled_data<-apply(data_ld, 2, function(x)(x/(sum(x))))##rescale by row
+colnames(rescaled_data)<-sort(unique(data$bin)) ##setting column names
+
+heatmap(rescaled_data, scale="none",Rowv = NA,Colv=NA, col= colorRampPalette(brewer.pal(9, "YlOrRd"))(25)) ##heatmap with 10% language bins
+legend(x="bottomright", legend=c("0%", "25%", "50%","75%","100%"), fill=colorRampPalette(brewer.pal(9, "YlOrRd"))(5))
+
+
+##heatmap binned with 10% data per bin (family distance)
+data$bin<-NA ##initializing the bins
+data<-data[order(data$fam_dist),]  ##order according to family distance
+ind<-seq(1,nrow(data),length.out=11) ##10 bins
+for(i in seq(1,length(ind)-1))
+{data$bin[floor(ind[i]):floor(ind[i+1])]<-i}  ##assign the bin number to each entry
+df<-data.frame(stringsAsFactors = F)
+for(i in sort(unique(data$bin)))
+{
+  ratings<-unlist(data$output[data$bin==i]) ##getting annotations
+  ratings<-ratings[-which(ratings=="dunno")] ##removing the answers for pairs of words the annotators were not familiar with
+  df<-rbind(df,data.frame(ratings=ratings,bin=rep(i,length(ratings)),stringsAsFactors = F))
+}
+data_fd<-as.matrix(table(df))
+
+rescaled_data<-apply(data_fd, 2, function(x)(x/(sum(x))))##rescale by row
+colnames(rescaled_data)<-sort(unique(data$bin)) ##setting column names
+##plotting heatmap
+heatmap(rescaled_data, scale="none",Rowv = NA,Colv=NA, col= colorRampPalette(brewer.pal(9, "YlOrRd"))(25)) ##heatmap with 10% language bins
+legend(x="bottomright", legend=c("0%", "25%", "50%","75%","100%"), fill=colorRampPalette(brewer.pal(9, "YlOrRd"))(5))
+
+```
+
