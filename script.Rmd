@@ -1,6 +1,5 @@
 ---
 title: "Meaning in colexification: beyond single edges and towards a network perspective"
-author: "Anna Di Natale, Armin Gander, David Garcia"
 output: 
   pdf_document:
     df_print: kable
